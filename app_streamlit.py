@@ -13,6 +13,8 @@ import tempfile
 import os
 from PIL import Image
 from ultralytics import YOLO
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
+import av
 
 MODEL_PATH = "best_helmet_model.pt"
 CONF_DEFAULT = 0.40
@@ -24,6 +26,10 @@ CLASS_COLORS = {
     'no vest'  : (0, 100, 220),
     'person'   : (150, 150, 150),
 }
+
+RTC_CONFIGURATION = RTCConfiguration(
+    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+)
 
 @st.cache_resource
 def load_model():
@@ -68,7 +74,6 @@ def detect(model, frame, conf):
                     stats['alert_msg'].append('Tanpa Vest')
             elif cls_lower == 'person':
                 stats['person'] += 1
-                # Kalau ada person tapi tidak ada helm/vest = alert
                 stats['alert'] = True
                 if 'Pekerja Tanpa APD Terdeteksi' not in stats['alert_msg']:
                     stats['alert_msg'].append('Pekerja Tanpa APD Terdeteksi')
@@ -81,7 +86,6 @@ def detect(model, frame, conf):
             cv2.rectangle(annotated, (x1, max(0, y1-th-12)), (x1+tw+6, y1), color, -1)
             cv2.putText(annotated, label, (x1+3, y1-4), font, 0.65, (255,255,255), 2)
 
-    # Kalau ada helm dan vest, hapus alert "Pekerja Tanpa APD"
     if stats['helmet'] > 0 and stats['vest'] > 0 and stats['no_helmet'] == 0 and stats['no_vest'] == 0:
         stats['alert'] = False
         stats['alert_msg'] = []
@@ -89,7 +93,6 @@ def detect(model, frame, conf):
     return annotated, stats
 
 def show_status(stats):
-    """Tampilkan status berdasarkan hasil deteksi"""
     if not stats['ada_deteksi']:
         st.markdown('<div style="background:#7f8c8d;color:white;padding:15px;border-radius:8px;font-size:18px;font-weight:bold;text-align:center;">⚠️ Tidak ada objek terdeteksi — Coba turunkan confidence atau perjelas gambar</div>', unsafe_allow_html=True)
     elif stats['alert']:
@@ -98,11 +101,39 @@ def show_status(stats):
     else:
         st.markdown('<div class="safe-box">✅ AMAN: Semua Pekerja Menggunakan APD Lengkap</div>', unsafe_allow_html=True)
 
+# ── VIDEO PROCESSOR REALTIME ────────────────────────────────
+class APDVideoProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.model = load_model()
+        self.conf  = CONF_DEFAULT
+
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        annotated, stats = detect(self.model, img, self.conf)
+
+        # Overlay status langsung di video
+        h, w = annotated.shape[:2]
+        if not stats['ada_deteksi']:
+            label = "? Tidak ada deteksi"
+            color = (128, 128, 128)
+        elif stats['alert']:
+            msg = " | ".join(stats['alert_msg'])
+            label = f"!! BAHAYA: {msg}"
+            color = (0, 0, 220)
+        else:
+            label = "OK AMAN: APD Lengkap"
+            color = (0, 200, 0)
+
+        cv2.rectangle(annotated, (0, h-45), (w, h), (0,0,0), -1)
+        cv2.putText(annotated, label, (10, h-12), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+        return av.VideoFrame.from_ndarray(annotated, format="bgr24")
+
+# ── UI ──────────────────────────────────────────────────────
 st.set_page_config(page_title="Deteksi APD Pekerja Pabrik - K3", page_icon="🪖", layout="wide")
 
 st.markdown("""
 <style>
-    .main { background-color: #0f0f1a; }
     .stApp { background-color: #0f0f1a; }
     h1, h2, h3 { color: #ffffff !important; }
     .alert-box {
@@ -140,7 +171,7 @@ with st.sidebar:
     st.markdown("## 📋 Tentang")
     st.markdown("Sistem ini menggunakan **YOLOv8s** untuk mendeteksi kepatuhan APD pekerja pabrik.")
 
-tab1, tab2, tab3 = st.tabs(["🖼️ Gambar", "🎬 Video", "📷 Kamera"])
+tab1, tab2, tab3 = st.tabs(["🖼️ Gambar", "🎬 Video", "📷 Kamera Realtime"])
 
 # ── TAB 1: GAMBAR ───────────────────────────────────────────
 with tab1:
@@ -220,30 +251,18 @@ with tab2:
             os.unlink(tfile.name)
             st.success(f"✅ Selesai! Frame dengan peringatan: {total_alert}")
 
-# ── TAB 3: KAMERA ───────────────────────────────────────────
+# ── TAB 3: KAMERA REALTIME ──────────────────────────────────
 with tab3:
-    st.markdown("### 📷 Kamera")
-    st.info("Ambil foto dari kamera untuk deteksi APD.")
+    st.markdown("### 📷 Kamera Realtime")
+    st.info("Klik **START** untuk mulai deteksi APD secara live. Status deteksi tampil langsung di video.")
 
-    camera_img = st.camera_input("Ambil foto dari kamera")
+    ctx = webrtc_streamer(
+        key="apd-realtime",
+        video_processor_factory=APDVideoProcessor,
+        rtc_configuration=RTC_CONFIGURATION,
+        media_stream_constraints={"video": True, "audio": False},
+        async_processing=True,
+    )
 
-    if camera_img:
-        img = Image.open(camera_img).convert("RGB")
-        frame = np.array(img)
-        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-
-        with st.spinner("🔍 Mendeteksi..."):
-            annotated_bgr, stats = detect(model, frame_bgr, conf)
-            annotated_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
-
-        st.markdown("**Hasil Deteksi**")
-        st.image(annotated_rgb, use_column_width=True)
-
-        show_status(stats)
-
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("✅ Helm",     stats['helmet'])
-        c2.metric("⚠️ No Helm", stats['no_helmet'])
-        c3.metric("✅ Vest",     stats['vest'])
-        c4.metric("⚠️ No Vest", stats['no_vest'])
-        c5.metric("⏱️ Waktu",   f"{stats['inf_ms']:.1f}ms")
+    if ctx.video_processor:
+        ctx.video_processor.conf = conf
