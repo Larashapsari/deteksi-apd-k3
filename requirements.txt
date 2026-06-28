@@ -3,5 +3,3 @@ numpy
 Pillow
 ultralytics
 opencv-python-headless
-streamlit-webrtc
-av
