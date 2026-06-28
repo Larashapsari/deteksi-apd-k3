@@ -1,0 +1,7 @@
+ultralytics==8.3.107
+streamlit==1.43.2
+opencv-python-headless==4.10.0.84
+Pillow==11.1.0
+numpy==2.2.3
+torch==2.5.1
+torchvision==0.20.1
